@@ -2,50 +2,34 @@ package org.mozilla.mozstumbler.client.mapview;
 
 import android.annotation.TargetApi;
 import android.app.Activity;
-import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
-import android.content.IntentFilter;
-import android.graphics.Canvas;
 import android.graphics.Color;
-import android.graphics.Paint;
-import android.graphics.Point;
-import android.os.AsyncTask;
 import android.os.Build;
 import android.os.Bundle;
-import android.support.v4.content.LocalBroadcastManager;
 import android.util.Log;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.Window;
 import java.net.URL;
-import java.util.ArrayList;
 import java.util.Timer;
 import java.util.TimerTask;
 import org.json.JSONException;
 import org.json.JSONObject;
-import org.mozilla.mozstumbler.client.MainApp;
 import org.mozilla.mozstumbler.service.SharedConstants;
-import org.mozilla.mozstumbler.service.StumblerService;
 import org.mozilla.mozstumbler.BuildConfig;
 import org.mozilla.mozstumbler.R;
 import org.mozilla.mozstumbler.client.MainActivity;
-import org.mozilla.mozstumbler.service.scanners.GPSScanner;
-import org.osmdroid.tileprovider.BitmapPool;
-import org.osmdroid.tileprovider.MapTileProviderBasic;
-import org.osmdroid.tileprovider.tilesource.ITileSource;
-import org.osmdroid.tileprovider.tilesource.OnlineTileSourceBase;
-import org.osmdroid.tileprovider.tilesource.TileSourceFactory;
-import org.osmdroid.tileprovider.tilesource.XYTileSource;
-import org.osmdroid.util.GeoPoint;
-import org.osmdroid.views.MapView;
-import org.osmdroid.views.Projection;
-import org.osmdroid.views.overlay.ItemizedIconOverlay;
-import org.osmdroid.views.overlay.ItemizedOverlay;
-import org.osmdroid.views.overlay.ItemizedOverlayWithFocus;
-import org.osmdroid.views.overlay.Overlay;
-import org.osmdroid.views.overlay.OverlayItem;
-import org.osmdroid.views.overlay.TilesOverlay;
+
+import com.mapbox.mapboxsdk.geometry.LatLng;
+import com.mapbox.mapboxsdk.overlay.GpsLocationProvider;
+import com.mapbox.mapboxsdk.overlay.TilesOverlay;
+import com.mapbox.mapboxsdk.overlay.UserLocationOverlay;
+import com.mapbox.mapboxsdk.tileprovider.MapTileLayerBasic;
+import com.mapbox.mapboxsdk.tileprovider.tilesource.MapboxTileLayer;
+import com.mapbox.mapboxsdk.tileprovider.tilesource.TileLayer;
+import com.mapbox.mapboxsdk.tileprovider.tilesource.WebSourceTileLayer;
+import com.mapbox.mapboxsdk.views.MapView;
 
 public final class MapActivity extends Activity {
     private static final String LOGTAG = MapActivity.class.getName();
@@ -54,33 +38,13 @@ public final class MapActivity extends Activity {
     private static String sCoverageUrl = null;
     private static final int MENU_REFRESH           = 1;
     private static final String ZOOM_KEY = "zoom";
-    private static final int DEFAULT_ZOOM = 2;
+    private static final float DEFAULT_ZOOM = 13;
     private static final String LAT_KEY = "latitude";
     private static final String LON_KEY = "longitude";
 
     private MapView mMap;
-    private ItemizedOverlay<OverlayItem> mPointOverlay;
-    private boolean mFirstLocationFix;
-    private ReporterBroadcastReceiver mReceiver;
+    private UserLocationOverlay mUserLocationOverlay;
     Timer mGetUrl = new Timer();
-    TilesOverlay mCoverageTilesOverlay = null;
-
-    private class ReporterBroadcastReceiver extends BroadcastReceiver {
-        public void reset()
-        {
-            mMap.getOverlays().remove(mPointOverlay);
-        }
-
-        @Override
-        public void onReceive(Context context, Intent intent) {
-            String action = intent.getAction();
-
-            if (action.equals(GPSScanner.ACTION_GPS_UPDATED)) {
-                MainApp app = (MainApp) getApplication();
-                new GetLocationAndMapItTask().execute(app.getService());
-            }
-        }
-    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -90,29 +54,20 @@ public final class MapActivity extends Activity {
 
         mMap = (MapView) this.findViewById(R.id.map);
         mMap.setTileSource(getTileSource());
-        mMap.setBuiltInZoomControls(true);
-        mMap.setMultiTouchControls(true);
+        mUserLocationOverlay = addLocationOverlay(this, mMap);
 
-        mFirstLocationFix = true;
-        int zoomLevel = DEFAULT_ZOOM; // Default to seeing the world, until we get a fix
+        float zoomLevel = DEFAULT_ZOOM;
         if (savedInstanceState != null) {
-            mFirstLocationFix = false;
-            zoomLevel = savedInstanceState.getInt(ZOOM_KEY, DEFAULT_ZOOM);
+            zoomLevel = savedInstanceState.getFloat(ZOOM_KEY, DEFAULT_ZOOM);
             if (savedInstanceState.containsKey(LAT_KEY) && savedInstanceState.containsKey(LON_KEY)) {
                 final double latitude = savedInstanceState.getDouble(LAT_KEY);
                 final double longitude = savedInstanceState.getDouble(LON_KEY);
-                mMap.getController().setCenter(new GeoPoint(latitude, longitude));
+                final LatLng center = new LatLng(latitude, longitude);
+                Log.d(LOGTAG, "Setting LatLon: " + center);
+                mMap.setCenter(center);
             }
         }
-        mMap.getController().setZoom(zoomLevel);
-
-        mReceiver = new ReporterBroadcastReceiver();
-        IntentFilter intentFilter = new IntentFilter();
-        intentFilter.addAction(GPSScanner.ACTION_GPS_UPDATED);
-        LocalBroadcastManager.getInstance(this).registerReceiver(mReceiver,
-                intentFilter);
-
-        Log.d(LOGTAG, "onCreate");
+        mMap.setZoom(zoomLevel);
 
         // @TODO: we do a similar "read from URL" in Updater, AbstractCommunicator, make one function for this
         if (sCoverageUrl == null) {
@@ -140,6 +95,24 @@ public final class MapActivity extends Activity {
                 }
             }, 0);
         }
+
+        //addCoverageTiles(mMap);
+        Log.d(LOGTAG, "onCreate");
+    }
+
+    private void addCoverageTiles(MapView mapView) {
+        TilesOverlay coverageTilesOverlay = mlsCoverageTilesOverlay(this, mapView);
+        mapView.getOverlays().add(coverageTilesOverlay);
+    }
+
+    private static UserLocationOverlay addLocationOverlay(Activity activity, MapView mapView) {
+        UserLocationOverlay userLocationOverlay = new UserLocationOverlay(
+                new GpsLocationProvider(activity), mapView);
+        userLocationOverlay.enableMyLocation();
+        userLocationOverlay.setDrawAccuracyEnabled(true);
+        mapView.setCenter(userLocationOverlay.getMyLocation());
+        mapView.getOverlays().add(userLocationOverlay);
+        return userLocationOverlay;
     }
 
     @TargetApi(11)
@@ -157,9 +130,8 @@ public final class MapActivity extends Activity {
     public boolean onOptionsItemSelected(MenuItem item) {
         switch (item.getItemId()) {
             case MENU_REFRESH:
-                if (mReceiver != null) {
-                    mReceiver.reset();
-                    setProgressBarIndeterminateVisibility(true);
+                if (mUserLocationOverlay != null) {
+                    mMap.setCenter(mUserLocationOverlay.getMyLocation());
                     return true;
                 }
                 return false;
@@ -168,97 +140,18 @@ public final class MapActivity extends Activity {
         }
     }
 
-    @SuppressWarnings("ConstantConditions")
-    private static OnlineTileSourceBase getTileSource() {
+    private static TileLayer getTileSource() {
         if (BuildConfig.TILE_SERVER_URL == null) {
-            return TileSourceFactory.DEFAULT_TILE_SOURCE;
+            return openStreetMapTileLayer();
         }
-        return new XYTileSource("MozStumbler Tile Store",
-                                null,
-                                1, 20, 256,
-                                ".png",
-                                new String[] { BuildConfig.TILE_SERVER_URL });
+        return new MapboxTileLayer(BuildConfig.TILE_SERVER_URL);
     }
 
-    private static TilesOverlay CoverageTilesOverlay(Context context) {
-        final MapTileProviderBasic coverageTileProvider = new MapTileProviderBasic(context);
-        final ITileSource coverageTileSource = new XYTileSource("Mozilla Location Service Coverage Map",
-                null,
-                1, 13, 256,
-                ".png",
-                new String[] { sCoverageUrl });
-        coverageTileProvider.setTileSource(coverageTileSource);
-        final TilesOverlay coverageTileOverlay = new TilesOverlay(coverageTileProvider,context);
+    private static TilesOverlay mlsCoverageTilesOverlay(Context context, MapView mapView) {
+        final MapTileLayerBasic coverageTileProvider = new MapTileLayerBasic(context, mlsCoverageTileLayer(), mapView);
+        final TilesOverlay coverageTileOverlay = new TilesOverlay(coverageTileProvider);
         coverageTileOverlay.setLoadingBackgroundColor(Color.TRANSPARENT);
         return coverageTileOverlay;
-    }
-
-    private void positionMapAt(GeoPoint point) {
-        if  (mCoverageTilesOverlay == null && sCoverageUrl != null) {
-            mCoverageTilesOverlay = CoverageTilesOverlay(this);
-            mMap.getOverlays().add(mCoverageTilesOverlay);
-        }
-
-        if (mPointOverlay != null) {
-            mMap.getOverlays().remove(mPointOverlay); // You are no longer here
-        }
-        mPointOverlay = getMapMarker(point);
-        mMap.getOverlays().add(mPointOverlay); // You are here!
-        if (mFirstLocationFix) {
-            mMap.getController().setZoom(13);
-            mFirstLocationFix = false;
-            mMap.getController().setCenter(point);
-        } else {
-            mMap.getController().animateTo(point);
-        }
-        mMap.invalidate();
-    }
-
-    private static class AccuracyCircleOverlay extends Overlay {
-        private GeoPoint mPoint;
-        private float mAccuracy;
-
-        public AccuracyCircleOverlay(Context ctx, GeoPoint point, float accuracy) {
-            super(ctx);
-            //this.mPoint = (GeoPoint) point.clone();
-            this.mPoint = point;
-            this.mAccuracy = accuracy;
-        }
-
-        protected void draw(Canvas c, MapView osmv, boolean shadow) {
-            if (shadow || mPoint == null) {
-                return;
-            }
-            Projection pj = osmv.getProjection();
-            Point center = pj.toPixels(mPoint, null);
-            float radius = pj.metersToEquatorPixels(mAccuracy);
-            Paint circle = new Paint();
-            circle.setARGB(0, 100, 100, 255);
-
-            // Fill
-            circle.setAlpha(40);
-            circle.setStyle(Paint.Style.FILL);
-            c.drawCircle(center.x, center.y, radius, circle);
-
-            // Border
-            circle.setAlpha(165);
-            circle.setStyle(Paint.Style.STROKE);
-            c.drawCircle(center.x, center.y, radius, circle);
-        }
-    }
-
-    private ItemizedOverlay<OverlayItem> getMapMarker(GeoPoint point) {
-        ArrayList<OverlayItem> items = new ArrayList<OverlayItem>();
-        items.add(new OverlayItem(null, null, point));
-        return new ItemizedOverlayWithFocus<OverlayItem>(
-            MapActivity.this,
-            items,
-            new ItemizedIconOverlay.OnItemGestureListener<OverlayItem>() {
-                @Override
-                public boolean onItemSingleTapUp(int index, OverlayItem item) { return false; }
-                @Override
-                public boolean onItemLongPress(int index, OverlayItem item) { return false; }
-            });
     }
 
     @Override
@@ -266,16 +159,15 @@ public final class MapActivity extends Activity {
         super.onStart();
 
         Intent i = new Intent(MainActivity.ACTION_UNPAUSE_SCANNING);
-        LocalBroadcastManager.getInstance(this).sendBroadcast(i);
         Log.d(LOGTAG, "onStart");
     }
 
     @Override
     protected void onSaveInstanceState(Bundle bundle) {
         super.onSaveInstanceState(bundle);
-        bundle.putInt(ZOOM_KEY, mMap.getZoomLevel());
-        bundle.putDouble(LON_KEY, mMap.getMapCenter().getLongitude());
-        bundle.putDouble(LAT_KEY, mMap.getMapCenter().getLatitude());
+        bundle.putFloat(ZOOM_KEY, mMap.getZoomLevel());
+        bundle.putDouble(LON_KEY, mMap.getCenter().getLongitude());
+        bundle.putDouble(LAT_KEY, mMap.getCenter().getLatitude());
     }
 
     @Override
@@ -283,8 +175,6 @@ public final class MapActivity extends Activity {
         super.onDestroy();
 
         Log.d(LOGTAG, "onDestroy");
-        mMap.getTileProvider().clearTileCache();
-        BitmapPool.getInstance().clearBitmapPool();
     }
 
     @Override
@@ -292,24 +182,25 @@ public final class MapActivity extends Activity {
         super.onStop();
 
         Log.d(LOGTAG, "onStop");
-        if (mReceiver != null) {
-            LocalBroadcastManager.getInstance(this).unregisterReceiver(mReceiver);
-            mReceiver = null;
-        }
     }
 
-    private final class GetLocationAndMapItTask extends AsyncTask<StumblerService, Void, GeoPoint> {
-        @Override
-        public GeoPoint doInBackground(StumblerService... params) {
-            Log.d(LOGTAG, "requesting location...");
+    private static TileLayer openStreetMapTileLayer() {
+        return new WebSourceTileLayer("openstreetmap",
+                "http://tile.openstreetmap.org/{z}/{x}/{y}.png").setName("OpenStreetMap")
+                .setAttribution("© OpenStreetMap Contributors")
+                .setMinimumZoomLevel(1)
+                .setMaximumZoomLevel(18);
+    }
 
-            StumblerService service = params[0];
-            return new GeoPoint(service.getLatitude(), service.getLongitude());
-        }
-
-        @Override
-        protected void onPostExecute(GeoPoint result) {
-            positionMapAt(result);
+    private static TileLayer mlsCoverageTileLayer() {
+        if (sCoverageUrl != null) {
+            return new WebSourceTileLayer("mozilla", sCoverageUrl + "{z}/{x}/{y}.png")
+                    .setName("Mozilla Location Service Coverage Map")
+                    .setAttribution("© Mozilla Location Services Contributors")
+                    .setMinimumZoomLevel(1)
+                    .setMaximumZoomLevel(13);
+        } else {
+            return null;
         }
     }
 }
